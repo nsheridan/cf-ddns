@@ -45,7 +45,7 @@ func updateDNS(config ConfigFile, ip string) error {
 	split := strings.SplitN(config.Global.Hostname, ".", 2)
 	domain := split[1]
 
-	log.Debugf("FQDN %s has domain %s", config.Global.Hostname, domain)
+	log.Debugf("Using domain %s from hostname %s", domain, config.Global.Hostname)
 	log.Debugf("Querying Cloudflare Zone ID for domain %s", domain)
 	id, err := cf.ZoneIDByName(domain)
 	if err != nil {
@@ -87,6 +87,7 @@ func loadConfig(path string) ConfigFile {
 	}
 	return cfg
 }
+
 func main() {
 	flag.Parse()
 	if *verbose {
