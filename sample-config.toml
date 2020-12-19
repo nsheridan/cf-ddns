@@ -1,0 +1,6 @@
+[global]
+hostname = "somehost.example.com"
+
+[cloudflare]
+email = "username@example.com"
+api_key = "0123456789abcdef"
