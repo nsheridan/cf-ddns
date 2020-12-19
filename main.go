@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"io/ioutil"
 	"strings"
+	"time"
 
+	"github.com/nsheridan/randduration"
 	log "github.com/sirupsen/logrus"
 
 	"github.com/cloudflare/cloudflare-go"
@@ -16,6 +18,8 @@ import (
 var (
 	cfgFile = flag.String("cfg_file", "cfddns.toml", "Path to config file")
 	verbose = flag.Bool("verbose", false, "Verbose output")
+
+	savedIP = "none"
 )
 
 // ConfigFile is a TOML config file
@@ -88,6 +92,28 @@ func loadConfig(path string) ConfigFile {
 	return cfg
 }
 
+func run(cfg ConfigFile, finished chan<- bool) {
+	ip, err := ipify.GetIp()
+	if err != nil {
+		log.Errorf("Error retrieving IP: %v\n", err)
+		finished <- true
+		return
+	}
+	log.Debugf("Discovered IP: %s", ip)
+	if savedIP == "none" || ip != savedIP {
+		log.Infof("Saved IP is %s, current IP is %s. Update required.", savedIP, ip)
+		if err := updateDNS(cfg, ip); err != nil {
+			log.Errorf("Unable to update DNS: %v", err)
+		} else {
+			log.Info("Done!")
+			savedIP = ip
+		}
+	} else {
+		log.Infof("IP %s hasn't changed since last run. Not taking any action", ip)
+	}
+	finished <- true
+}
+
 func main() {
 	flag.Parse()
 	if *verbose {
@@ -96,14 +122,16 @@ func main() {
 
 	log.Debugf("Loading config file %s", *cfgFile)
 	cfg := loadConfig(*cfgFile)
-	log.Debug("Discovering IP")
-	ip, err := ipify.GetIp()
-	if err != nil {
-		log.Fatalf("Error retrieving IP: %v\n", err)
-	}
-	log.Debugf("Discovered IP: %s", ip)
 
-	if err := updateDNS(cfg, ip); err != nil {
-		log.Fatalf("Unable to update DNS: %v", err)
+	finished := make(chan bool, 1)
+	log.Debug("Starting server")
+	for {
+		go run(cfg, finished)
+		<-finished
+
+		r := &randduration.RandomDuration{}
+		duration := r.Generate()
+		log.Infof("Sleeping for %v", duration)
+		time.Sleep(duration)
 	}
 }
