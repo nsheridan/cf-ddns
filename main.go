@@ -42,7 +42,7 @@ type CloudflareConfig struct {
 
 // GlobalConfig contains essential config
 type GlobalConfig struct {
-	Hostname string `toml:"hostname"`
+	Hostnames []string `toml:"hostnames"`
 }
 
 func updateDNS(config *dnsconfig, ip string) error {
@@ -85,7 +85,7 @@ func loadConfig(path string) ConfigFile {
 	return cfgfile
 }
 
-func run(cfg *dnsconfig, finished chan<- bool) {
+func run(cfgs []*dnsconfig, finished chan<- bool) {
 	ip, err := ipify.GetIp()
 	if err != nil {
 		log.Errorf("Error retrieving IP: %v\n", err)
@@ -95,11 +95,13 @@ func run(cfg *dnsconfig, finished chan<- bool) {
 	log.Debugf("Discovered IP: %s", ip)
 	if savedIP == "none" || ip != savedIP {
 		log.Infof("Saved IP is %s, current IP is %s. Update required.", savedIP, ip)
-		if err := updateDNS(cfg, ip); err != nil {
-			log.Errorf("Unable to update DNS: %v", err)
-		} else {
-			log.Info("Updated")
-			savedIP = ip
+		for _, cfg := range cfgs {
+			if err := updateDNS(cfg, ip); err != nil {
+				log.Errorf("Unable to update DNS: %v", err)
+			} else {
+				log.Infof("Updated %s -> %s", cfg.hostname, ip)
+				savedIP = ip
+			}
 		}
 	} else {
 		log.Infof("IP %s hasn't changed since last run. Not taking any action", ip)
@@ -107,25 +109,29 @@ func run(cfg *dnsconfig, finished chan<- bool) {
 	finished <- true
 }
 
-func setupCloudflare(config ConfigFile) *dnsconfig {
+func setupCloudflare(config ConfigFile) []*dnsconfig {
 	cfapi, err := cloudflare.New(config.Cloudflare.APIKey, config.Cloudflare.Email)
 	if err != nil {
 		log.Fatalf("Error creating Cloudflare API client: %v", err)
 	}
-	domain := strings.SplitN(config.Global.Hostname, ".", 2)[1]
-	log.Debugf("Using domain %s from hostname %s", domain, config.Global.Hostname)
-	log.Debugf("Querying Cloudflare Zone ID for domain %s", domain)
-	id, err := cfapi.ZoneIDByName(domain)
-	if err != nil {
-		log.Fatalf("Error retrieving zone ID for domain %s: %v", domain, err)
+	configs := []*dnsconfig{}
+	for _, hostname := range config.Global.Hostnames {
+		domain := strings.SplitN(hostname, ".", 2)[1]
+		log.Debugf("Using domain %s from hostname %s", domain, hostname)
+		log.Debugf("Querying Cloudflare Zone ID for domain %s", domain)
+		id, err := cfapi.ZoneIDByName(domain)
+		if err != nil {
+			log.Fatalf("Error retrieving zone ID for domain %s: %v", domain, err)
+		}
+		log.Debugf("Got zone ID %s", id)
+		configs = append(configs,
+			&dnsconfig{
+				cfapi:    cfapi,
+				hostname: hostname,
+				zoneID:   id,
+			})
 	}
-	log.Debugf("Got zone ID %s", id)
-	return &dnsconfig{
-		cfapi:    cfapi,
-		hostname: config.Global.Hostname,
-		zoneID:   id,
-	}
-
+	return configs
 }
 
 func main() {
@@ -137,11 +143,11 @@ func main() {
 	log.Debugf("Loading config file %s", *cfgFile)
 	cfg := loadConfig(*cfgFile)
 
-	dc := setupCloudflare(cfg)
+	configs := setupCloudflare(cfg)
 	finished := make(chan bool, 1)
 	log.Debug("Starting server")
 	for {
-		go run(dc, finished)
+		go run(configs, finished)
 		<-finished
 
 		r := &randduration.RandomDuration{}
