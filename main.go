@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
@@ -16,10 +17,8 @@ import (
 	"github.com/rdegges/go-ipify"
 )
 
-const unset = "unset"
-
 type record struct {
-	hostname, zoneID, savedIP string
+	hostname, zoneID string
 }
 
 type dnsconfig struct {
@@ -27,45 +26,46 @@ type dnsconfig struct {
 	records []*record
 }
 
-func (d *dnsconfig) update(record *record, ip string) error {
-	if record.savedIP == ip {
-		log.Infof("IP %s hasn't changed since last run. Not taking any action", ip)
-		return nil
-	}
-	log.Infof("%s saved IP is %s, current IP is %s. Update required.", record.hostname, record.savedIP, ip)
-	recs, err := d.cfapi.DNSRecords(record.zoneID, cloudflare.DNSRecord{Name: record.hostname})
+func (d *dnsconfig) update(ctx context.Context, record *record, ip string) error {
+	recs, _, err := d.cfapi.ListDNSRecords(
+		ctx, cloudflare.ZoneIdentifier(record.zoneID), cloudflare.ListDNSRecordsParams{Name: record.hostname, Type: "A"})
 	if err != nil {
 		return fmt.Errorf("error fetching zone for record %v: %v", record, err)
 	}
 	if len(recs) == 0 {
 		log.Debugf("Creating new A record for %s -> %s", record.hostname, ip)
-		rec := cloudflare.DNSRecord{
+		rec := cloudflare.CreateDNSRecordParams{
 			Type:    "A",
 			Name:    record.hostname,
 			Content: ip,
-			Proxied: false,
-			TTL:     300,
+			Proxied: cloudflare.BoolPtr(false),
+			TTL:     1,
 			ZoneID:  record.zoneID,
 		}
-		_, err = d.cfapi.CreateDNSRecord(record.zoneID, rec)
+		_, err = d.cfapi.CreateDNSRecord(ctx, cloudflare.ZoneIdentifier(record.zoneID), rec)
 		return err
 	}
-	if len(recs) > 1 {
+	if len(recs) != 1 {
 		return fmt.Errorf("Found %d records for %s. There should only be one", len(recs), record.hostname)
 	}
-	log.Debugf("Updating A record for %s -> %s", record.hostname, ip)
 	rec := recs[0]
-	rec.Type = "A"
-	rec.Content = ip
-	err = d.cfapi.UpdateDNSRecord(record.zoneID, rec.ID, rec)
+	if rec.Content == ip {
+		log.Infof("Record %s IP %s hasn't changed, not taking action", record.hostname, ip)
+		return nil
+	}
+	log.Debugf("Updating A record for %s -> %s", record.hostname, ip)
+	new := cloudflare.UpdateDNSRecordParams{
+		Content: ip,
+		ID:      rec.ID,
+	}
+	_, err = d.cfapi.UpdateDNSRecord(ctx, cloudflare.ZoneIdentifier(record.zoneID), new)
 	if err == nil {
-		record.savedIP = ip
 		log.Infof("Updated %s -> %s", record.hostname, ip)
 	}
 	return err
 }
 
-func (d *dnsconfig) run() {
+func (d *dnsconfig) run(ctx context.Context) {
 	ip, err := ipify.GetIp()
 	if err != nil {
 		log.Errorf("Error retrieving IP: %v\n", err)
@@ -76,7 +76,7 @@ func (d *dnsconfig) run() {
 	for _, record := range d.records {
 		record := record
 		g.Go(func() error {
-			return d.update(record, ip)
+			return d.update(ctx, record, ip)
 		})
 	}
 	if err := g.Wait(); err != nil {
@@ -127,7 +127,6 @@ func setupCloudflare(config ConfigFile) dnsconfig {
 		configs.records = append(configs.records, &record{
 			hostname: hostname,
 			zoneID:   id,
-			savedIP:  unset,
 		})
 	}
 	return configs
@@ -151,9 +150,10 @@ func main() {
 
 	dnsConfig := setupCloudflare(cfg)
 	log.Debug("Starting server")
+	ctx := context.Background()
 	r := &randduration.RandomDuration{}
 	for {
-		dnsConfig.run()
+		dnsConfig.run(ctx)
 		duration := r.Generate()
 		log.Infof("Sleeping for %v", duration)
 		time.Sleep(duration)
